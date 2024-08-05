@@ -1,19 +1,26 @@
 import os
 import sys
-from dataclasses import dataclass  # Add this import
-from catboost import CatBoostClassifier
+from dataclasses import dataclass
 from sklearn.ensemble import (
     AdaBoostClassifier,
     GradientBoostingClassifier,
     RandomForestClassifier,
+    StackingClassifier
 )
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    precision_score,
+    recall_score,
+    f1_score
+)
 from sklearn.model_selection import GridSearchCV, cross_val_score
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
 from src.exception import CustomException
 from src.logger import logging
 from src.utils import save_object
@@ -35,6 +42,43 @@ class ModelTrainer:
         best_model = grid_search.best_estimator_
         logging.info(f"Best parameters for {model.__class__.__name__}: {grid_search.best_params_}")
         return best_model
+
+    def calculate_metrics(self, y_true, y_pred):
+        """
+        Calculate and log metrics: confusion matrix, precision, recall, f1 score.
+        """
+        cm = confusion_matrix(y_true, y_pred)
+        precision = precision_score(y_true, y_pred, average='weighted')
+        recall = recall_score(y_true, y_pred, average='weighted')
+        f1 = f1_score(y_true, y_pred, average='weighted')
+        
+        # Handling binary classification confusion matrix
+        if cm.shape == (2, 2):
+            tn, fp, fn, tp = cm.ravel()
+        else:
+            tn = fp = fn = tp = None
+        
+        metrics = {
+            "confusion_matrix": cm,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1,
+            "tp": tp,
+            "tn": tn,
+            "fp": fp,
+            "fn": fn
+        }
+        
+        logging.info(f"Confusion Matrix:\n{cm}")
+        logging.info(f"Precision: {precision}")
+        logging.info(f"Recall: {recall}")
+        logging.info(f"F1 Score: {f1}")
+        logging.info(f"True Positives: {tp}")
+        logging.info(f"True Negatives: {tn}")
+        logging.info(f"False Positives: {fp}")
+        logging.info(f"False Negatives: {fn}")
+        
+        return metrics
 
     def initiate_model_trainer(self, train_array, test_array, preprocessor_path):
         try:
@@ -78,8 +122,21 @@ class ModelTrainer:
                 })
             }
 
+            # Stacking Classifier
+            base_learners = [
+                ('xgb', XGBClassifier()),
+                ('rf', RandomForestClassifier()),
+                ('lr', LogisticRegression(max_iter=1000))
+            ]
+            stacking_model = StackingClassifier(
+                estimators=base_learners,
+                final_estimator=LogisticRegression(max_iter=1000)
+            )
+            models["StackingClassifier"] = (stacking_model, {})
+
             best_model = None
             best_score = 0
+            best_metrics = {}
 
             for model_name, (model, param_grid) in models.items():
                 logging.info(f"Tuning {model_name}")
@@ -93,24 +150,29 @@ class ModelTrainer:
                 predicted = tuned_model.predict(X_test)
                 test_score = accuracy_score(y_test, predicted)
 
+                # Calculate and log additional metrics
+                metrics = self.calculate_metrics(y_test, predicted)
+
                 logging.info(f"{model_name} cross-validated accuracy: {mean_cv_score}")
                 logging.info(f"{model_name} test accuracy: {test_score}")
 
                 if test_score > best_score:
                     best_score = test_score
                     best_model = tuned_model
+                    best_metrics = metrics
 
             if best_score < 0.6:
                 raise CustomException("No best model found")
 
             logging.info(f"Best model found: {best_model.__class__.__name__} with score {best_score}")
+            logging.info(f"Best model metrics: {best_metrics}")
 
             save_object(
                 file_path=self.model_trainer_config.trained_model_file_path,
                 obj=best_model
             )
 
-            return best_score
+            return best_score, best_metrics
 
         except Exception as e:
             raise CustomException(e, sys)
