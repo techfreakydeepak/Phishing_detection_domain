@@ -7,4 +7,5 @@ catboost
 dill
 xgboost
 joblib
+flask
 -e .
